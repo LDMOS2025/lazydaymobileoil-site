@@ -166,233 +166,306 @@ input,select,textarea{width:100%;padding:10px;border:1px solid var(--ring);borde
   </section>
 </div>
 
-<script>
-/* ==== GAS endpoint (YOUR new URL) ==== */
+/*** =============================== 
+ *  CONFIG
+ * =============================== */
+
+// 🔗 Your deployed Apps Script Web App URL (ends with /exec)
 const GAS_ENDPOINT = "https://script.google.com/macros/s/AKfycbwYbiDQ4DweUG96TaZDsR5w_SUTvgYHfXHDeHsBVhWiPkNTXC0Ujj25XnJoLvlfVNaauQ/exec";
 
-/* Appointment Type IDs (from Acuity) */
-const ACUITY_TYPES = {
-  oil:          85364590,
-  brakes_front: 85364671,
-  brakes_rear:  85364740,
-  brakes_both:  85364836,
-  oil_both:     85364948
+// Business + pricing
+const BIZ_NAME = "Lazy Day Mobile Oil";
+const TAX_RATE = 0.07;            // 7% Indiana sales tax
+const PRICING = {
+  oilBase: 109.99,                // base oil change price (incl. up to 5 qts)
+  extraQt: 7.99,                  // per extra quart
+  synUp: 29.99                    // upgrade to full synthetic, if you use it
 };
 
-/* Optional staff calendar limit (leave empty to ignore) */
-const STAFF_CALENDAR_ID = "";
+// Acuity appointment type IDs (must match what you set in Acuity)
+const ACUITY_TYPES = {
+  oil: 85384590,
+  brakes_front: 85384591,
+  brakes_rear: 85384592,
+  brakes_both: 85384593,
+  oil_brakes: 85384594
+};
 
-const TAX = 0.07, OVERHEAD = 0.08;
-const PRICING = {oilBase:109.99,extraQt:7.99,synUp:29.99,
-  bundle:{compact:199,midsize:229,suv:259,truck:299,heavy:339},
-  rotors:{compact:240,midsize:280,suv:320,truck:360,heavy:420},
-  calipers:{compact:260,midsize:300,suv:340,truck:380,heavy:440}};
-const ADD_ONS = {"Wiper Blades (pair)":19.99,"Cabin Air Filter":39.99,"Engine Air Filter":34.99,"Washer Fluid Top-Off":4.99};
+// Helper
+const byId = (id) => document.getElementById(id);
 
-const byId=id=>document.getElementById(id), nf=n=>'$'+(Math.round(n*100)/100).toFixed(2), pad2=n=>String(n).padStart(2,'0');
-function setSelectPlaceholder(sel, text){ sel.innerHTML=''; const o=document.createElement('option'); o.value=''; o.disabled=true; o.selected=true; o.hidden=true; o.textContent=text; sel.appendChild(o); }
+/*** ===============================
+ *  UI HELPERS
+ * =============================== */
 
-/* ==== INIT ==== */
-(function(){
-  const t=new Date(); const today=t.toISOString().slice(0,10);
-  byId('prefDate').setAttribute('min',today); t.setDate(t.getDate()+1);
-  byId('prefDate').value=t.toISOString().slice(0,10);
+// Format money
+function fmtMoney(n) {
+  return "$" + (n || 0).toFixed(2);
+}
 
-  const box=byId('addons'); Object.entries(ADD_ONS).forEach(([label,price])=>{
-    const el=document.createElement('label'); el.className='tile';
-    el.innerHTML=`<span><input type="checkbox" data-price="${price}"> <strong>${label}</strong></span> <small>+ ${nf(price)}</small>`;
-    box.appendChild(el); el.querySelector('input').addEventListener('change', recalc);
+// Read number from input (or 0)
+function numVal(id) {
+  const el = byId(id);
+  if (!el) return 0;
+  const v = parseFloat(el.value);
+  return isNaN(v) ? 0 : v;
+}
+
+// Show note / error under the Pay & Book button
+function setSubmitNote(msg, isError = false) {
+  const el = byId("submitNote");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.color = isError ? "#b91c1c" : "#065f46";
+}
+
+// Optional: a little note under the date/time area
+function setAvailNote(msg) {
+  const el = byId("availNote"); // <small id="availNote"> in HTML (optional)
+  if (!el) return;
+  el.textContent = msg || "";
+}
+
+/*** ===============================
+ *  CART / TOTALS
+ * =============================== */
+
+function computeTotals() {
+  // Base oil service
+  let subtotal = PRICING.oilBase;
+
+  // Extra quarts over 5
+  const qts = numVal("capacity");    // assume this is total qt capacity
+  const extraQts = Math.max(0, qts - 5);
+  subtotal += extraQts * PRICING.extraQt;
+
+  // TODO: add any add-ons here if needed
+
+  // Tax
+  const tax = subtotal * TAX_RATE;
+  const total = subtotal + tax;
+
+  // Update DOM
+  const subtotalEl = byId("subtotal");
+  const taxEl = byId("tax");
+  const totalEl = byId("total");
+  if (subtotalEl) subtotalEl.textContent = fmtMoney(subtotal);
+  if (taxEl) taxEl.textContent = fmtMoney(tax);
+  if (totalEl) totalEl.textContent = fmtMoney(total);
+
+  return { subtotal, tax, total, extraQts };
+}
+
+function updateCheckoutState() {
+  const { total } = computeTotals();
+  const needed = missing();
+  const btn = byId("cashOut");
+  if (!btn) return;
+  btn.disabled = !!needed.length || total <= 0;
+}
+
+/*** ===============================
+ *  FIELD VALIDATION
+ * =============================== */
+
+function missing() {
+  const fields = [
+    { id: "firstName", label: "First name" },
+    { id: "lastName", label: "Last name" },
+    { id: "phone", label: "Phone" },
+    { id: "email", label: "Email" },
+    { id: "vin", label: "VIN" },
+    { id: "prefDate", label: "Preferred date" },
+    { id: "prefSlot", label: "Preferred time" },
+    { id: "addr", label: "Service address" },
+    { id: "city", label: "City" },
+    { id: "state", label: "State" },
+    { id: "zip", label: "ZIP" }
+  ];
+
+  const missing = [];
+  fields.forEach(f => {
+    const el = byId(f.id);
+    if (!el) return;
+    const v = (el.value || "").trim();
+    if (!v) missing.push(f.label);
   });
+  return missing;
+}
 
-  ['photoFront','photoDriver','photoPassenger','photoRear'].forEach(id=>{
-    byId(id).addEventListener('change', e=>{
-      const f=e.target.files[0]; if(!f) return;
-      const r=new FileReader(); r.onload=()=>{const img=new Image(); img.src=r.result; byId('photoPreview').appendChild(img);};
-      r.readAsDataURL(f);
+/*** ===============================
+ *  ACUITY – LOAD TIMES
+ * =============================== */
+
+async function loadTimesForDate() {
+  const dateEl = byId("prefDate");
+  const slotEl = byId("prefSlot");
+  if (!dateEl || !slotEl) return;
+
+  const date = dateEl.value; // format: YYYY-MM-DD from <input type="date">
+  if (!date) return;
+
+  const serviceSel = byId("service");
+  const serviceKey = serviceSel ? serviceSel.value : "oil";
+  const appointmentTypeID = ACUITY_TYPES[serviceKey] || ACUITY_TYPES.oil;
+
+  // Reset dropdown
+  slotEl.innerHTML = "";
+  const opt = document.createElement("option");
+  opt.textContent = "Loading times...";
+  opt.value = "";
+  slotEl.appendChild(opt);
+  slotEl.disabled = true;
+  setAvailNote("Checking Acuity schedule…");
+
+  try {
+    const url = `${GAS_ENDPOINT}?path=times` +
+      `&appointmentTypeID=${encodeURIComponent(appointmentTypeID)}` +
+      `&date=${encodeURIComponent(date)}`;
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+
+    slotEl.innerHTML = "";
+    if (!json.ok || !Array.isArray(json.slots) || !json.slots.length) {
+      const o = document.createElement("option");
+      o.textContent = json.error || "No times available";
+      o.value = "";
+      slotEl.appendChild(o);
+      slotEl.disabled = true;
+      setAvailNote("No open times for that day.");
+      return;
+    }
+
+    json.slots.forEach(s => {
+      const o = document.createElement("option");
+      o.value = s.time;      // e.g. "10:00 AM"
+      o.textContent = s.time;
+      slotEl.appendChild(o);
     });
-  });
 
-  ['service','oilType','viscosity','capacity','promoInput'].forEach(id=>byId(id).addEventListener('change',recalc));
-  ['rotF','rotR','calF','calR','calB'].forEach(id=>{
-    const el=byId(id); el.addEventListener('change', ()=>{
-      if(id==='calB' && el.checked){ byId('calF').checked=false; byId('calR').checked=false; }
-      if((id==='calF'||id==='calR') && (byId('calF').checked||byId('calR').checked)) { byId('calB').checked=false; }
-      recalc();
-    });
-  });
-
-  byId('applyPromo').addEventListener('click', recalc);
-  byId('findTimes').addEventListener('click', loadTimes);
-  byId('decodeBtn').addEventListener('click', decodeVIN);
-  recalc();
-})();
-
-/* ==== VIN LOOKUP ==== */
-async function decodeVIN(){
-  let vin=(byId('vin').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
-  if(vin.length<11){ byId('decodeStatus').textContent='Enter at least 11 characters of VIN.'; return; }
-  byId('decodeStatus').textContent='Decoding VIN…';
-  try{
-    const r=await fetch(`https://vpic.nhtsa.dot.gov/api/vehicles/decodevinvaluesextended/${vin}?format=json`,{cache:'no-store'});
-    const j=await r.json(), d=j?.Results?.[0]; if(!d) throw new Error('No result');
-    byId('year').value=d.ModelYear||''; byId('make').value=d.Make||''; byId('model').value=d.Model||'';
-    byId('engine').value=[d.EngineCylinders?`${d.EngineCylinders}-cyl`:'', d.DisplacementL?`${d.DisplacementL}L`:'' ].join(' ').trim();
-    if(!byId('capacity').value){
-      const L=parseFloat(d.DisplacementL||'0')||0; let cap=5.5;
-      if(L<1.7)cap=4.2; else if(L<2.6)cap=4.8; else if(L<3.6)cap=5.5; else if(L<5.1)cap=6.0; else if(L<6.1)cap=6.8; else cap=7.5;
-      byId('capacity').value=cap.toFixed(1); byId('capHelp').textContent='Estimated from engine size';
-    }
-    if(!byId('viscosity').value){
-      const yr=+d.ModelYear||0, body=(d.BodyClass||'').toLowerCase(), gvwr=parseFloat((d.GVWR||'').replace(/[^\d.]/g,'')||'0')||0;
-      let grade='5W-20'; if(yr>=2018)grade='0W-20'; if(body.includes('truck')||gvwr>=6000)grade='5W-30';
-      if((d.Aspiration||'').toLowerCase().includes('turbo'))grade='5W-30'; byId('viscosity').value=grade; byId('viscHelp').textContent='Recommended from VIN';
-    }
-    byId('decodeStatus').textContent='Vehicle found ✓';
-  }catch{ byId('decodeStatus').textContent='Couldn’t decode VIN; you can still book.'; }
-  updatePriceHints(); recalc();
-}
-
-/* ==== PRICE HELPERS ==== */
-function subclass(){
-  const t=(byId('model').value+' '+(byId('engine').value||'')).toLowerCase();
-  if(t.includes('truck')||t.includes('pickup'))return'truck';
-  if(t.includes('suv')||t.includes('utility')||t.includes('van'))return'suv';
-  if(t.includes('coupe')||t.includes('hatch')||t.includes('compact'))return'compact';
-  return'midsize';
-}
-function perAxle(k){const t=PRICING[k], cls=subclass(); return t[cls]??t.midsize;}
-function updatePriceHints(){
-  const b=perAxle('bundle'), r=perAxle('rotors'), c=perAxle('calipers');
-  byId('serviceHelp').textContent=`Pads per axle ~ ${nf(b)} | Rotors ~ ${nf(r)} | Calipers ~ ${nf(c)}`;
-  ['hintRotF','hintRotR'].forEach(id=>byId(id).textContent='+'+nf(r));
-  ['hintCalF','hintCalR'].forEach(id=>byId(id).textContent='+'+nf(c));
-  byId('hintCalB').textContent='+'+nf(c*2);
-}
-
-/* ==== AVAILABILITY ==== */
-async function loadTimes(){
-  const date=byId('prefDate').value, serviceKey=byId('service').value, sel=byId('prefSlot');
-  setSelectPlaceholder(sel,'Loading times…'); sel.disabled=true; byId('calHelp').textContent='';
-  if(!serviceKey){ byId('calHelp').textContent='Select a service first'; setSelectPlaceholder(sel,'Select a time…'); return; }
-  if(!date){ byId('calHelp').textContent='Pick a date'; setSelectPlaceholder(sel,'Select a time…'); return; }
-  const appointmentTypeID = ACUITY_TYPES[serviceKey]; if(!appointmentTypeID){ byId('calHelp').textContent='Missing Acuity ID'; return; }
-
-  try{
-    const u=new URL(GAS_ENDPOINT); u.searchParams.set('path','times'); u.searchParams.set('appointmentTypeID',String(appointmentTypeID)); u.searchParams.set('date',date);
-    if(String(STAFF_CALENDAR_ID||'').trim()) u.searchParams.set('calendarID', String(STAFF_CALENDAR_ID).trim());
-    const res=await fetch(u, {mode:'cors', cache:'no-store'}); const j=await res.json();
-    if(!j || j.ok===false){ byId('calHelp').textContent=(j && j.error) ? `Error: ${j.error}` : 'Error loading'; setSelectPlaceholder(sel,'No times'); sel.disabled=true; return; }
-    const slots = (j.slots||[]).map(s=>s.time||'').filter(Boolean);
-    setSelectPlaceholder(sel,'Select a time…');
-    if(slots.length===0){ byId('calHelp').textContent='No times for that date.'; setSelectPlaceholder(sel,'No times'); sel.disabled=true; return; }
-    for(const t of slots){
-      const iso = t.includes('T') ? t : t.replace(' ','T');
-      const hasTZ = /[zZ]|[+-]\d{2}:\d{2}$/.test(iso);
-      const d = new Date(hasTZ ? iso : iso+'Z');
-      if(isNaN(d.getTime())) continue;
-      const v = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-      const label = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
-      const o=document.createElement('option'); o.value=v; o.textContent=label; sel.appendChild(o);
-    }
-    sel.disabled=false; byId('calHelp').textContent=`${sel.options.length-1} time(s) available.`;
-  }catch(e){ console.error(e); byId('calHelp').textContent='Network error.'; setSelectPlaceholder(sel,'Error loading'); sel.disabled=true; }
-}
-
-/* ==== CART & PAYMENT ==== */
-function recalc(){
-  let items=0, lines=[];
-  const s=byId('service').value || '';
-  const hasOil=(s==='oil' || s==='oil_both');
-  if(hasOil){
-    items+=PRICING.oilBase; lines.push(['Oil Change (incl. 5 qts)', PRICING.oilBase]);
-    if(byId('oilType').value==='syn'){ items+=PRICING.synUp; lines.push(['Full Synthetic Upcharge', PRICING.synUp]); }
-    const cap=parseFloat(byId('capacity').value || '5.5'), extra=Math.max(0, cap-5);
-    if(extra>0){ const add=extra*PRICING.extraQt; items+=add; lines.push([`Extra Oil (${extra.toFixed(1)} qts)`, add]); }
-    if(byId('viscosity').value) lines.push([`Oil Grade ${byId('viscosity').value}`, 0]);
+    slotEl.disabled = false;
+    setAvailNote("");
+  } catch (err) {
+    console.error("loadTimesForDate error", err);
+    slotEl.innerHTML = "";
+    const o = document.createElement("option");
+    o.textContent = "Error loading";
+    o.value = "";
+    slotEl.appendChild(o);
+    slotEl.disabled = true;
+    setAvailNote("Could not load availability.");
   }
-  const per=perAxle('bundle');
-  if(s==='brakes_front'){ items+=per; lines.push(['Front Brake Pads (Bundle)', per]); }
-  if(s==='brakes_rear'){ items+=per; lines.push(['Rear Brake Pads (Bundle)', per]); }
-  if(s==='brakes_both' || s==='oil_both'){ items+=per*2; lines.push(['Front & Rear Brake Pads (Bundle)', per*2]); }
-  const pR=perAxle('rotors'), pC=perAxle('calipers');
-  if(byId('rotF')?.checked){ items+=pR; lines.push(['Rotors (Front, pair)', pR]); }
-  if(byId('rotR')?.checked){ items+=pR; lines.push(['Rotors (Rear, pair)', pR]); }
-  if(byId('calB')?.checked){ items+=pC*2; lines.push(['Calipers (Front & Rear)', pC*2]); }
-  else{
-    if(byId('calF')?.checked){ items+=pC; lines.push(['Calipers (Front, pair)', pC]); }
-    if(byId('calR')?.checked){ items+=pC; lines.push(['Calipers (Rear, pair)', pC]); }
-  }
-  document.querySelectorAll('#addons input[type="checkbox"]:checked').forEach(ch=>{
-    const p=parseFloat(ch.dataset.price||'0'); items+=p; lines.push([ch.parentElement.innerText.trim(), p]);
-  });
-
-  const discounted = items;
-  const overhead   = discounted * OVERHEAD;
-  const taxable    = discounted + overhead;
-  const tax        = taxable * TAX;
-  const total      = taxable + tax;
-
-  byId('lines').innerHTML = lines.length ? lines.map(([l,a])=>`<tr><td>${l}</td><td>${nf(a)}</td></tr>`).join('') : `<tr><td class="note">No items yet</td><td class="note">$0.00</td></tr>`;
-  byId('discountRow').style.display='none';
-  byId('total').textContent = nf(total);
-
-  updateCheckoutState();
-  return { total, tax, overhead, items };
 }
 
-function missing(){
-  const need=[]; ['firstName','lastName','phone','email','addr','city','state','zip','service','prefDate','prefSlot'].forEach(id=>{ if(!byId(id).value) need.push(id); });
-  return need;
-}
-function updateCheckoutState(){
+/*** ===============================
+ *  STRIPE CHECKOUT FLOW (via GAS)
+ * =============================== */
+
+async function handlePayAndBook() {
   const need = missing();
-  byId('cashOut').disabled = need.length > 0;
-  byId('submitNote').textContent = need.length ? ('Missing: '+need.join(', ')) : '';
-}
+  if (need.length) {
+    setSubmitNote("Missing: " + need.join(", "), true);
+    updateCheckoutState();
+    return;
+  }
 
-/* Pay & Book with Stripe Checkout */
-byId('cashOut').addEventListener('click', async ()=>{
-  const need = missing(); if(need.length){ updateCheckoutState(); return; }
-  const serviceKey = byId('service').value;
-  const appointmentTypeID = ACUITY_TYPES[serviceKey];
-  if(!appointmentTypeID){ byId('submitNote').textContent='Missing service mapping'; return; }
+  const { total, extraQts } = computeTotals();
+  const amountCents = Math.round(total * 100);
 
-  const whenLocal = `${byId('prefDate').value} ${byId('prefSlot').value}:00`;
+  const serviceSel = byId("service");
+  const serviceKey = serviceSel ? serviceSel.value : "oil";
+  const appointmentTypeID = ACUITY_TYPES[serviceKey] || ACUITY_TYPES.oil;
 
-  const totText = (byId('total').textContent || '0').replace(/[^0-9.]/g,'') || '0';
-  const amountCents = Math.round(parseFloat(totText) * 100);
+  // Build datetime string Acuity / backend expects: "YYYY-MM-DD HH:MM"
+  const d = byId("prefDate")?.value || "";
+  const t = byId("prefSlot")?.value || "";
+  const datetime = d && t ? `${d} ${t}` : "";
 
   const payload = {
     amountCents,
     appointmentTypeID,
-    datetime: whenLocal,
-    firstName: byId('firstName').value,
-    lastName:  byId('lastName').value,
-    email:     byId('email').value,
-    phone:     byId('phone').value,
+    datetime,
+    firstName: byId("firstName")?.value || "",
+    lastName: byId("lastName")?.value || "",
+    email: byId("email")?.value || "",
+    phone: byId("phone")?.value || "",
     notes: [
-      `VIN:${byId('vin').value||''}`,
-      `Oil:${byId('capacity').value||''}qts ${byId('viscosity').value||''}`,
-      `Addr:${byId('addr').value}, ${byId('city').value}, ${byId('state').value} ${byId('zip').value}`,
-      `Tech:${byId('techNotes').value||''}`
-    ].join(' | ')
+      `VIN: ${(byId("vin")?.value || "").toUpperCase()}`,
+      `Capacity: ${byId("capacity")?.value || ""} qts (extra: ${extraQts})`,
+      `Oil Grade: ${byId("viscosity")?.value || ""}`,
+      `Addr: ${byId("addr")?.value || ""}, ${byId("city")?.value || ""}, ${byId("state")?.value || ""} ${byId("zip")?.value || ""}`,
+      `Tech notes: ${byId("techNotes")?.value || ""}`
+    ].join(" | ")
   };
 
-  byId('cashOut').disabled = true;
-  byId('submitNote').textContent = 'Creating checkout…';
+  const btn = byId("cashOut");
+  if (btn) btn.disabled = true;
+  setSubmitNote("Creating secure checkout with Stripe…", false);
 
-  try{
-    const u = new URL(GAS_ENDPOINT); u.searchParams.set('path','stripe_create'); u.searchParams.set('origin', location.origin);
-    const res = await fetch(u, { method:'POST', headers:{'Content-Type':'text/plain'}, body: JSON.stringify(payload) });
-    const j = await res.json();
-    if(!j.ok || !j.url){ throw new Error(j.error || 'Failed to create Checkout session'); }
-    location.href = j.url;
-  }catch(e){
-    console.error(e);
-    byId('submitNote').textContent = 'Error: '+ e.message;
-    byId('cashOut').disabled = false;
+  try {
+    const res = await fetch(`${GAS_ENDPOINT}?path=stripe_create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+
+    if (!json.ok || !json.url) {
+      console.error(json);
+      setSubmitNote(json.error || "Unable to start checkout. Please call or text to book.", true);
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    // Redirect to Stripe Checkout
+    window.location.href = json.url;
+  } catch (err) {
+    console.error(err);
+    setSubmitNote("Network error talking to server. Please try again.", true);
+    if (btn) btn.disabled = false;
   }
-});
-</script>
+}
+
+/*** ===============================
+ *  INIT – WIRE UP EVENTS
+ * =============================== */
+
+function initLDMO() {
+  const inputsToWatch = [
+    "capacity", "firstName", "lastName", "phone", "email",
+    "vin", "prefDate", "prefSlot", "addr", "city", "state", "zip"
+  ];
+  inputsToWatch.forEach(id => {
+    const el = byId(id);
+    if (!el) return;
+    el.addEventListener("input", updateCheckoutState);
+    el.addEventListener("change", updateCheckoutState);
+  });
+
+  const prefDateEl = byId("prefDate");
+  if (prefDateEl) {
+    prefDateEl.addEventListener("change", () => {
+      loadTimesForDate();
+      updateCheckoutState();
+    });
+  }
+
+  const cashBtn = byId("cashOut");
+  if (cashBtn) {
+    cashBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      handlePayAndBook();
+    });
+  }
+
+  // Initial totals
+  computeTotals();
+  updateCheckoutState();
+}
+
+document.addEventListener("DOMContentLoaded", initLDMO);
 </body>
 </html>
+
