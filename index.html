@@ -166,11 +166,11 @@ input,select,textarea{width:100%;padding:10px;border:1px solid var(--ring);borde
   </section>
 </div>
 <script>
-/*** =============================== 
+/*** ===============================
  *  CONFIG
  * =============================== */
 
-// 🔗 Your deployed Apps Script Web App URL (ends with /exec)
+// 🔗 Your deployed Apps Script Web App URL (ENDS WITH /exec)
 const GAS_ENDPOINT = "https://script.google.com/macros/s/AKfycbzo6QgEqlVlEy6Ht8mRIDHxL2p5TeSkbbfif_VEmRgka80E2_gRokVUNrNMbHZJ9WZW/exec";
 
 // Business + pricing
@@ -219,9 +219,9 @@ function setSubmitNote(msg, isError = false) {
   el.style.color = isError ? "#b91c1c" : "#065f46";
 }
 
-// Optional: a little note under the date/time area
+// Optional little note under Date/Time (if you add <small id="availNote">)
 function setAvailNote(msg) {
-  const el = byId("availNote"); // <small id="availNote"> in HTML (optional)
+  const el = byId("availNote");
   if (!el) return;
   el.textContent = msg || "";
 }
@@ -239,7 +239,7 @@ function computeTotals() {
   const extraQts = Math.max(0, qts - 5);
   subtotal += extraQts * PRICING.extraQt;
 
-  // TODO: add any add-ons here if needed
+  // TODO: add any add-ons (wipers, filters, brakes) to subtotal here if desired
 
   // Tax
   const tax = subtotal * TAX_RATE;
@@ -294,6 +294,74 @@ function missing() {
 }
 
 /*** ===============================
+ *  VIN LOOKUP (NHTSA)
+ * =============================== */
+
+async function handleVinLookup() {
+  const vinEl = byId("vin");
+  if (!vinEl) {
+    console.error("VIN input #vin not found");
+    return;
+  }
+
+  const rawVin = (vinEl.value || "").trim();
+  if (!rawVin) {
+    alert("Please enter a VIN first.");
+    return;
+  }
+
+  const vin = rawVin.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+  if (vin.length < 11) {
+    alert("Please enter a valid VIN (at least 11 characters).");
+    return;
+  }
+
+  const yearEl   = byId("year");
+  const makeEl   = byId("make");
+  const modelEl  = byId("model");
+  const engineEl = byId("engine");
+
+  if (yearEl)   yearEl.value   = "";
+  if (makeEl)   makeEl.value   = "";
+  if (modelEl)  modelEl.value  = "";
+  if (engineEl) engineEl.value = "";
+
+  try {
+    const url = `https://vpic.nhtsa.dot.gov/api/vehicles/decodevinvaluesextended/${encodeURIComponent(vin)}?format=json`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (!data || !Array.isArray(data.Results) || !data.Results.length) {
+      alert("No vehicle data returned for that VIN.");
+      return;
+    }
+
+    const r = data.Results[0];
+
+    if (yearEl)   yearEl.value   = r.ModelYear || "";
+    if (makeEl)   makeEl.value   = r.Make || "";
+    if (modelEl)  modelEl.value  = r.Model || "";
+
+    if (engineEl) {
+      const sizeL = r.DisplacementL || r.EngineDisplacementL || "";
+      const cyl   = r.EngineCylinders || "";
+      const cfg   = r.EngineConfiguration || "";
+      const descr = [sizeL ? `${sizeL}L` : "", cyl ? `${cyl} cyl` : "", cfg]
+        .filter(Boolean)
+        .join(" ");
+      engineEl.value = descr;
+    }
+
+    // NHTSA does *not* give oil capacity; you can still type capacity manually.
+    updateCheckoutState();
+  } catch (err) {
+    console.error("VIN lookup error", err);
+    alert("Could not look up VIN right now. Please try again or enter details manually.");
+  }
+}
+
+/*** ===============================
  *  ACUITY – LOAD TIMES
  * =============================== */
 
@@ -302,7 +370,7 @@ async function loadTimesForDate() {
   const slotEl = byId("prefSlot");
   if (!dateEl || !slotEl) return;
 
-  const date = dateEl.value; // format: YYYY-MM-DD from <input type="date">
+  const date = dateEl.value; // "YYYY-MM-DD"
   if (!date) return;
 
   const serviceSel = byId("service");
@@ -340,7 +408,7 @@ async function loadTimesForDate() {
 
     json.slots.forEach(s => {
       const o = document.createElement("option");
-      o.value = s.time;      // e.g. "10:00 AM"
+      o.value = s.time;
       o.textContent = s.time;
       slotEl.appendChild(o);
     });
@@ -351,11 +419,11 @@ async function loadTimesForDate() {
     console.error("loadTimesForDate error", err);
     slotEl.innerHTML = "";
     const o = document.createElement("option");
-    o.textContent = "Error loading";
+    o.textContent = "Acuity error – see admin";
     o.value = "";
     slotEl.appendChild(o);
     slotEl.disabled = true;
-    setAvailNote("Could not load availability.");
+    setAvailNote("Acuity error. Check Apps Script logs.");
   }
 }
 
@@ -378,7 +446,6 @@ async function handlePayAndBook() {
   const serviceKey = serviceSel ? serviceSel.value : "oil";
   const appointmentTypeID = ACUITY_TYPES[serviceKey] || ACUITY_TYPES.oil;
 
-  // Build datetime string Acuity / backend expects: "YYYY-MM-DD HH:MM"
   const d = byId("prefDate")?.value || "";
   const t = byId("prefSlot")?.value || "";
   const datetime = d && t ? `${d} ${t}` : "";
@@ -419,8 +486,7 @@ async function handlePayAndBook() {
       return;
     }
 
-    // Redirect to Stripe Checkout
-    window.location.href = json.url;
+    window.location.href = json.url;   // Stripe Checkout
   } catch (err) {
     console.error(err);
     setSubmitNote("Network error talking to server. Please try again.", true);
@@ -460,14 +526,24 @@ function initLDMO() {
     });
   }
 
+  const vinBtn = byId("vinLookupBtn");  // Make sure your button has id="vinLookupBtn"
+  if (vinBtn) {
+    vinBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      handleVinLookup();
+    });
+  }
+
   // Initial totals
   computeTotals();
   updateCheckoutState();
+}
 
 document.addEventListener("DOMContentLoaded", initLDMO);
 </script>
 </body>
 </html>
+
 
 
 
